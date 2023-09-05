@@ -29,10 +29,23 @@ class Actor(nn.Module):
         self.gru1 = nn.GRU(state1_dim, hidden_dim)
         self.gru2 = nn.GRU(state2_dim, hidden_dim)
         self.schedule_output = nn.Linear(hidden_dim, action_dim)
-        self.unload_output = nn.Linear(hidden_dim, unload_dim)  # 新增的输出层用于卸载位置
+        # self.unload_output = nn.Linear(hidden_dim, unload_dim)  # 新增的输出层用于卸载位置
+        self.unload_output = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, unload_dim),
+        )
 
     def forward(self, x1, x2, hidden1, hidden2):
         output1, hidden1 = self.gru1(x1.unsqueeze(0), hidden1)
+        # print(f'x1:',x1)
+        # print('hidden1:',hidden1)
         output2, hidden2 = self.gru2(x2.unsqueeze(0), hidden2)  # 使用第二个 GRU 层
 
         action_logits = self.schedule_output(output1)
@@ -54,7 +67,18 @@ class Critic(nn.Module):
     def __init__(self, state_dim, hidden_dim):
         super(Critic, self).__init__()
         self.gru = nn.GRU(state_dim, hidden_dim)
-        self.output = nn.Linear(hidden_dim, 1)
+        # self.output = nn.Linear(hidden_dim, 1)
+        self.output = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, 1),
+        )
 
     def forward(self, x, hidden):
         output, hidden = self.gru(x.unsqueeze(0), hidden)
@@ -122,9 +146,6 @@ def train_actor_critic(s_env, u_env, model, num_epochs, learning_rate, file_path
             available_actions = torch.zeros(action_space_size)  # 初始化为0
             available_actions[action_space] = 1.0  # 设置可选择的动作为1
 
-            # 卸载环境
-            unload_action_space = u_env.get_action_space()
-
             # 状态1
             state_tensor1 = state1.unsqueeze(0)  # 所有节点是否被调选作为状态
             # 状态2
@@ -138,17 +159,6 @@ def train_actor_critic(s_env, u_env, model, num_epochs, learning_rate, file_path
 
             masked_action_probs = schedule_action_probs * available_actions  # 将不可选择的动作的概率置为0
             action_probs_normalized = masked_action_probs / masked_action_probs.sum()  # 归一化概率
-            # action_dist = torch.distributions.Categorical(action_probs)
-            # 调度动作
-            # # 定义ϵ-greedy算法参数
-            # epsilon = 0.1  # 选择随机动作的概率
-            # if random.random() < epsilon:
-            #     # 以ϵ的概率选择随机动作
-            #     action1 = torch.randint(0, action_probs_normalized[-1],
-            #                             (1,)).item()  # 替换num_possible_actions为你的动作空间大小
-            # else:
-            #     # 以1-ϵ的概率选择基于模型输出的动作
-            #     action1 = torch.argmax(action_probs_normalized).item()
 
             action1 = torch.argmax(action_probs_normalized).item()  # 选择概率最大的动作
             schedule.append(action1)
@@ -208,14 +218,17 @@ def train_actor_critic(s_env, u_env, model, num_epochs, learning_rate, file_path
             if done:
                 # 提交reward
                 # reward2 = u_env.step(file_path, action2, action1)
-                reward2, next_state2, bad_time, current_time = u_env.step(file_path, action2, action1)
-                reward1 = (bad_time - (remain_time2 + current_time)) / bad_time  # 调度前的总时间 - 调度后的总时间 (正数)
-                reward2 = bad_time - current_time
+                reward2, next_state2, after_time, bad_time = u_env.step(file_path, action2, action1,
+                                                                          remain_time1, remain_time2)
+                # reward1 = (bad_time - (remain_time2 + current_time)) / bad_time  # 调度前的总时间 - 调度后的总时间 (正数)
+                weight_reward2 = bad_time - after_time
                 # rewards.append(float(reward1))
                 rewards.append(float(reward2))
+                weight_rewards = [value * 1 for value in rewards]
 
-                epoch_rewards.append(rewards)
-                schedule_time = u_env.max_local_edge
+                epoch_rewards.append(reward2 * weight_reward2)
+                # schedule_time = u_env.max_local_edge
+                schedule_time = bad_time
 
                 state2 = next_state2
 
@@ -225,13 +238,17 @@ def train_actor_critic(s_env, u_env, model, num_epochs, learning_rate, file_path
                 print(f"done:{epoch + 1}/{num_epochs},调度时间:{schedule_time} ")
                 # print(f'value2:{value2},reward2:{rewards}')
                 # print(f"reward:{rewards},调度顺序为：{schedule}")
-                # print(f"unload:{unload}")
-                # print(f'reward:{rewards}')
+                # print(f"调度顺序为：{schedule}")
+                print(f"unload:{unload}")
+                # print(f'reward:{weight_rewards}')
+                print(f'reward:{weight_rewards}')
+                print(f'value2:{value2}, {values2[-1]}')
                 # print(f'state2:{state2}')
                 break
             else:
                 # 提交reward
-                reward2, next_state2, bad_time, current_time = u_env.step(file_path, action2, action1)
+                reward2, next_state2, bad_time, current_time = u_env.step(file_path, action2, action1,
+                                                                          remain_time1, remain_time2)
                 # print('badtime', bad_time)
                 # print('current_time', current_time)
                 # print('remain_time1',remain_time2)
@@ -244,30 +261,17 @@ def train_actor_critic(s_env, u_env, model, num_epochs, learning_rate, file_path
 
         total_actor_loss = 0
         total_critic_loss = 0
-        for log, rew, val in zip(log_probs2, rewards, values2):
+        for log, rew, val in zip(log_probs2, weight_rewards, values2):
             # 优势值
             advantage = abs(rew - float(val))
             actor_loss = -log * advantage
             critic_loss = critic_criterion(val, torch.tensor([[[rew]]]))
             total_actor_loss += actor_loss
             total_critic_loss += critic_loss
-        loss = total_actor_loss + total_critic_loss
+        loss = total_actor_loss + 0.001 * total_critic_loss
         optimizer.zero_grad()
         loss.backward()
-        print('loss:', loss)
+        # print('loss:', loss)
         optimizer.step()
 
-        # # 梯度更新
-        # # actor_loss1 = -torch.stack(log_probs1).sum()  # 使用负对数似然作为损失
-        # actor_loss2 = -torch.stack(log_probs2).sum()  # 使用负对数似然作为损失
-        # actor_loss = actor_loss2
-        # # actor_loss = actor_loss1 + actor_loss2
-        # # critic_loss = critic_criterion(torch.tensor(rewards), torch.stack(values).squeeze())
-        # critic_loss = critic_criterion(torch.tensor(rewards), torch.stack(values2).squeeze())
-        # loss = actor_loss + critic_loss
-        # print('loss:', loss)
-        # # 清除之前的梯度
-        # optimizer.zero_grad()
-        # loss.backward()
-        # optimizer.step()
     return epochs, epoch_rewards

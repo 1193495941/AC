@@ -2,16 +2,14 @@
     main
 """
 import os.path
-
-from env.my_env import schedule_env
-from env.my_env import unload_env
+from env.offloading_my_env import unload_env
 from model import *
 
 if __name__ == "__main__":
     # 初始化参数
     federal_num_epochs = 10
     num_epochs = 1000
-    learning_rate = 0.01
+    learning_rate = 0.001
 
     for f_epochs in range(federal_num_epochs):
         # 每个分布式模型进行训练

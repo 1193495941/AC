@@ -183,7 +183,7 @@ class schedule_env:
 
 
 class unload_env(object):
-    
+
     def __init__(self, edge_process_capable,
                  local_process_capable, bandwidth_up=10.0, bandwidth_dl=10.0):
         self.edge_process_capable = edge_process_capable
@@ -251,9 +251,11 @@ class unload_env(object):
         state = self.get_state()
         return state
 
-    def step(self, file_path, unload_action, task_id):
+    def step(self, file_path, unload_action, task_id, remain_time1, remain_time2):
         # 最坏时间
         bad_time = self.locally_execution_cost(taskGraph(file_path).sum_data_size())
+
+        assert abs(bad_time - 1212) < 1
 
         # running time on local processor   # 本地运行时间
         T_l = [0] * taskGraph(file_path).num_nodes
@@ -262,14 +264,29 @@ class unload_env(object):
         # running time on receiving channel # 本地接收时间
         T_dl = [0] * taskGraph(file_path).num_nodes
 
-        # finish time on cloud for each task    # 边端完成时间
+        # finish time on cloud for each task_index    # 边端完成时间
         FT_cloud = [0] * taskGraph(file_path).num_nodes
-        # finish time on sending channel for each task  #
+        # finish time on sending channel for each task_index  #
         FT_ws = [0] * taskGraph(file_path).num_nodes
-        # finish time locally for each task     # 本地完成时间
+        # finish time locally for each task_index     # 本地完成时间
         FT_locally = [0] * taskGraph(file_path).num_nodes
-        # finish time receiving channel for each task   #
+        # finish time receiving channel for each task_index   #
         FT_wr = [0] * taskGraph(file_path).num_nodes
+
+        # 卸载前的最大时间
+        behind_time = max(self.FT_local, self.FT_edge)
+        if behind_time == self.FT_local:
+            behind_time = behind_time
+            pre_time = behind_time + remain_time1  # 卸载前的总时间
+        else:
+            if len(taskGraph(file_path).get_pre_task(task_id) != 0):
+                pre_local_time = max(self.local_available_time,
+                                     max([max(FT_locally[j], FT_wr[j]) for j in
+                                          taskGraph(file_path).get_pre_task(task_id)])) + remain_time1
+                pre_time = max(behind_time, pre_local_time)
+            else:
+                pre_local_time = self.FT_local + remain_time1
+                pre_time = max(behind_time, pre_local_time)
 
         # 本地端
         if unload_action == 0:
@@ -289,12 +306,28 @@ class unload_env(object):
             self.FT_local = FT_locally[task_id]
             self.max_local_edge = max(self.FT_local, self.FT_edge)
 
+            if self.max_local_edge == self.FT_local:
+                after_time = self.max_local_edge + remain_time2
+            else:
+                if len(taskGraph(file_path).get_pre_task(task_id) != 0):
+                    after_local_time = max(self.local_available_time,
+                                           max([max(FT_locally[j], FT_wr[j]) for j in
+                                                taskGraph(file_path).get_pre_task(task_id)])) + remain_time2
+                    after_time = max(self.max_local_edge, after_local_time)
+                else:
+                    after_local_time = self.FT_local + remain_time1
+                    after_time = max(self.max_local_edge, after_local_time)
+            # print(f'{task_id},本地pre time:{pre_time}')
+            # print(f'{task_id},本地after time:{after_time}')
+            reward2 = pre_time - after_time
+            # print(f'本地reward2:{reward2}')
 
-
-            reward2 = (1 / 2 - (self.max_local_edge - self.min_local_edge) / self.max_local_edge)
+            # reward2 = (1 - (self.max_local_edge - self.min_local_edge) / self.max_local_edge)
+            self.dag_time = [self.FT_local, self.FT_edge]
+            # print('dag_time:',self.dag_time)
             next_state2 = self.get_state()
             # print('local_reward:', reward2)
-            return reward2, next_state2, bad_time, self.max_local_edge
+            return reward2, next_state2, after_time, self.max_local_edge
 
         # 边缘端
         else:
@@ -347,15 +380,33 @@ class unload_env(object):
                 self.FT_edge = wr_finish_time
                 self.max_local_edge = max(self.FT_local, self.FT_edge)
 
-        self.task_finish_time = wr_finish_time
+            self.task_finish_time = wr_finish_time
+
+        if self.max_local_edge == self.FT_local:
+            after_time = self.max_local_edge + remain_time2
+        else:
+            if len(taskGraph(file_path).get_pre_task(task_id) != 0):
+                after_local_time = max(self.local_available_time,
+                                       max([max(FT_locally[j], FT_wr[j]) for j in
+                                            taskGraph(file_path).get_pre_task(task_id)])) + remain_time2
+                after_time = max(self.max_local_edge, after_local_time)
+            else:
+                after_local_time = self.FT_local + remain_time2
+                after_time = max(self.max_local_edge, after_local_time)
+        # print(f'{task_id},边端pre time:{pre_time}')
+        # print(f'{task_id},边端after time:{after_time}')
+
+        reward2 = pre_time - after_time
+        # print(f'边端reward2:{reward2}')
 
         self.current_FT = max(self.task_finish_time, self.current_FT)
         # self.current_FT = max(self.FT_local, self.FT_edge)
 
         self.min_local_edge = min(self.FT_local, self.FT_edge)
 
-        reward2 = (1 / 2 - (self.max_local_edge - self.min_local_edge) / self.max_local_edge)
-
+        # reward2 = (1 - (self.max_local_edge - self.min_local_edge) / self.max_local_edge)
+        self.dag_time = [self.FT_local, self.FT_edge]
+        # print('dag_time:', self.dag_time)
         next_state2 = self.get_state()
         # print('edge_reward:',reward2)
-        return reward2, next_state2, bad_time, self.max_local_edge
+        return reward2, next_state2, after_time, bad_time

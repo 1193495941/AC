@@ -54,13 +54,4 @@ for model in loaded_models:
 for i, model in enumerate(loaded_models):
     torch.save(model.state_dict(), './updated_model_pth/model{}.pth'.format(i))
 
-# for name, _ in loaded_models[0].state_dict():
-#     weighted_params = [model.state_dict()[name] * weight for model, weight in zip(loaded_models, weights)]
-#     print(f'name:{name}')
-#     averaged_param = sum(weighted_params)
-#     aggregated_state_dict[name] = averaged_param
 
-# for param_new, params in zip(new_model.parameters(), zip(*[model.parameters() for model in loaded_models])):
-#     print(f'new model parameters:{param_new}')
-#     print(f'parms:{params}')
-# param_new.data.copy_(sum(p * w for p, w in zip(params, weights)))
