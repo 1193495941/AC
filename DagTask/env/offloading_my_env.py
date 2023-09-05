@@ -165,7 +165,7 @@ class OffloadingEnvironment(Resources, TaskGraph):
 
         return state_vector_list
 
-    def offloading_step(self, offloading_action, task):
+    def offloading_step(self, offloading_action, task, pre_offloading, after_offloading):
         length = self.num_nodes + 1
         # running time on local processor
         T_l = [0] * length
@@ -182,6 +182,20 @@ class OffloadingEnvironment(Resources, TaskGraph):
         FT_locally = [0] * length
         # finish time receiving channel for each task_index
         FT_wr = [0] * length
+
+        # 卸载前的时间
+        self.current_time = max(self.local_available_time, self.edge_available_time)
+        if self.current_time == self.local_available_time:
+            pre_offloading_time = self.current_time + pre_offloading  # 卸载前的总时间
+        else:
+            if len(self.get_node_predecessors(task)) != 0:
+                pre_local_time = max(self.local_available_time,
+                                     max([max(FT_locally[j], FT_wr[j]) for j in
+                                          self.get_node_predecessors(task)])) + pre_offloading
+                pre_offloading_time = max(pre_local_time, self.edge_available_time)
+            else:
+                pre_local_time = self.local_available_time + pre_offloading
+                pre_offloading_time = max(pre_local_time, self.edge_available_time)
 
         # locally scheduling
         if offloading_action == 0:
