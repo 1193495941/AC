@@ -12,6 +12,7 @@ import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import random
 
 from env.offloading_my_env import OffloadingEnvironment
 from env.offloading_my_env import TaskGraph
@@ -79,9 +80,20 @@ class ActorCritic:
     def take_action(self, state):
         state = torch.tensor([state], dtype=torch.float).to(self.device)
         probs = self.actor(state)
-        action_dist = torch.distributions.Categorical(probs)
+        # print('probs:', probs)
 
-        action = action_dist.sample().item()
+        epsilon = 0.12
+        if random.random() < epsilon:
+            # 以 epsilon 的概率随机选择一个动作
+            action = random.randint(0, 1)
+        else:
+            # 以 1 - epsilon 的概率选择具有最高概率的动作
+            action = torch.argmax(probs).item()
+
+        # action = torch.argmax(probs).item()
+        # action_dist = torch.distributions.Categorical(probs)
+        # action = torch.distributions.Categorical(probs).sample().item()
+        # action = 1
         return action
 
     def update(self, transition_dict):
@@ -112,16 +124,18 @@ class ActorCritic:
 
 def train_on_policy_agent(schedule_list, env, agent, num_episodes):
     return_list = []
-    for i in range(10):
-        with tqdm(total=int(num_episodes / 10), desc="Iteration %d" % i) as pbar:
-            for i_episode in range(int(num_episodes / 10)):
+    time_list = []
+    for i in range(20):
+        with tqdm(total=int(num_episodes / 20), desc="Iteration %d" % (i+1)) as pbar:
+            for i_episode in range(int(num_episodes / 20)):
                 episode_return = 0
                 transition_dict = {'states': [],
                                    'hiddens': [],
                                    'actions': [],
                                    'next_states': [],
                                    'rewards': [],
-                                   'dones': []}
+                                   'dones': [],
+                                   'time': []}
 
                 index = 0
                 done = False
@@ -158,12 +172,17 @@ def train_on_policy_agent(schedule_list, env, agent, num_episodes):
                     index += 1
                     if next_task == -1:
                         done = True
-                print(f'episode:{i_episode},actions:{transition_dict["actions"]}')
+                time_list.append(current_time)
+                # print(f'episode:{i_episode},actions:{transition_dict["actions"]}')
+                # print(f'episode:{i_episode},local:edge-->{env.local_available_time}:{env.edge_available_time}')
+                # print(f'episode:{i_episode},time:{current_time}')
                 return_list.append(episode_return)
                 agent.update(transition_dict)
                 if (i_episode + 1) % 10 == 0:
-                    pbar.set_postfix({'episode': '%d' % (num_episodes / 10 * i + i_episode + 1),
-                                      'return': '%.3f' % np.mean(return_list[-10])})
+                    pbar.set_postfix({'episode': '%d' % (num_episodes / 20 * i + i_episode + 1),
+                                      'return': '%.3f' % np.mean(return_list[-10]),
+                                      'avg_time': '%.3f' % np.mean(time_list[-10])
+                                      })
                 pbar.update(1)
     return return_list
 
@@ -185,7 +204,7 @@ def moving_average(a, window_size):
 if __name__ == "__main__":
     # 参数
     actor_lr = 1e-5
-    critic_lr = 1e-5
+    critic_lr = 1e-6
     num_episodes = 2000
     gamma = 0.98
     device = "cpu"
@@ -212,10 +231,10 @@ if __name__ == "__main__":
         # 图 结构
         task_graph = TaskGraph(file_path)
         # 卸载环境
-        env = OffloadingEnvironment(mec_process_capable=(10 * 1024 * 1024),
+        env = OffloadingEnvironment(mec_process_capable=(10.0 * 1024 * 1024),
                                     mobile_process_capable=(1.0 * 1024 * 1024),
-                                    bandwidth_up=14.0,
-                                    bandwidth_dl=14.0,
+                                    bandwidth_up=7.0,
+                                    bandwidth_dl=7.0,
                                     graph_file_paths=file_path)
         # 调度list
         schedule_list = dag_schedule_list[i]
@@ -225,5 +244,5 @@ if __name__ == "__main__":
         plt.plot(episodes_list, mv_return)
         plt.xlabel('Episodes')
         plt.ylabel('Returns')
-        plt.title('Smooth Actor-Critic on DAG{}'.format(i))
+        plt.title('Smooth Actor-Critic on DAG{}'.format(i + 1))
         plt.show()
