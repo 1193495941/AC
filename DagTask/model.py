@@ -235,14 +235,14 @@ def train_actor_critic(s_env, u_env, model, num_epochs, learning_rate, file_path
                 s_env.adjacency_matrix = np.copy(init_adjacency_matrix)
                 epochs.append(epoch)
 
-                print(f"done:{epoch + 1}/{num_epochs},调度时间:{schedule_time} ")
+                # print(f"done:{epoch + 1}/{num_epochs},调度时间:{schedule_time} ")
                 # print(f'value2:{value2},reward2:{rewards}')
                 # print(f"reward:{rewards},调度顺序为：{schedule}")
-                # print(f"调度顺序为：{schedule}")
-                print(f"unload:{unload}")
+                print(f"done:{epoch + 1}/{num_epochs} 调度顺序为：{schedule}")
+                # print(f"unload:{unload}")
                 # print(f'reward:{weight_rewards}')
-                print(f'reward:{weight_rewards}')
-                print(f'value2:{value2}, {values2[-1]}')
+                # print(f'reward:{weight_rewards}')
+                # print(f'value2:{value2}, {values2[-1]}')
                 # print(f'state2:{state2}')
                 break
             else:

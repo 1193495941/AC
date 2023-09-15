@@ -10,7 +10,7 @@ from model import *
 if __name__ == "__main__":
     # 初始化参数
     federal_num_epochs = 10
-    num_epochs = 1000
+    num_epochs = 10
     learning_rate = 0.01
 
     for f_epochs in range(federal_num_epochs):

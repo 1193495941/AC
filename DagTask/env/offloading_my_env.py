@@ -113,6 +113,22 @@ class OffloadingEnvironment(Resources, TaskGraph):
         self.local_available_time = 0.0
         self.edge_available_time = 0.0
         self.current_time = 0.0
+        self.length = self.num_nodes + 1
+        # running time on local processor
+        self.T_l = [0] * self.length
+        # running time on sending channel
+        self.T_ul = [0] * self.length
+        # running time on receiving channel
+        self.T_dl = [0] * self.length
+
+        # finish time on cloud for each task_index
+        self.FT_cloud = [0] * self.length
+        # finish time on sending channel for each task_index
+        self.FT_ws = [0] * self.length
+        # finish time locally for each task_index
+        self.FT_locally = [0] * self.length
+        # finish time receiving channel for each task_index
+        self.FT_wr = [0] * self.length
 
     #   将 offload_random20_{X} 文件夹内所有的.gz 添加到task_graph_list中
     def task_graph_list(self, graph_number, graph_file_paths):
@@ -128,6 +144,21 @@ class OffloadingEnvironment(Resources, TaskGraph):
         self.local_available_time = 0.0  # 目前本地端时间
         self.edge_available_time = 0.0  # 目前边缘端时间
         self.current_time = 0.0  # 当前卸载的最大时间,是本地端和边缘端的最大时间
+
+        # running time on local processor
+        self.T_l = [0] * self.length
+        # running time on sending channel
+        self.T_ul = [0] * self.length
+        # running time on receiving channel
+        self.T_dl = [0] * self.length
+        # finish time on cloud for each task_index
+        self.FT_cloud = [0] * self.length
+        # finish time on sending channel for each task_index
+        self.FT_ws = [0] * self.length
+        # finish time locally for each task_index
+        self.FT_locally = [0] * self.length
+        # finish time receiving channel for each task_index
+        self.FT_wr = [0] * self.length
 
     #   生成状态向量
     def offloading_state_list(self):
@@ -159,218 +190,88 @@ class OffloadingEnvironment(Resources, TaskGraph):
 
             succs_task_index_set = succs_task_index_set[0:6]
             pre_task_index_set = pre_task_index_set[0:6]
+            #   本地边端系统状态
+            system_set = []
+            while len(system_set) < 2:
+                system_set.append(0.0)
+            #   历史动作信息
+            history_set = []
+            while len(history_set) < 20:
+                history_set.append(-1.0)
 
-            state_vector = task_embedding_vector + pre_task_index_set + succs_task_index_set
+            state_vector = task_embedding_vector + pre_task_index_set + succs_task_index_set + \
+                           system_set + history_set
             state_vector_list.append(state_vector)
 
         return state_vector_list
 
-    def offloading_step(self, offloading_action, task, pre_offloading, after_offloading):
-        length = self.num_nodes + 1
-        # running time on local processor
-        T_l = [0] * length
-        # running time on sending channel
-        T_ul = [0] * length
-        # running time on receiving channel
-        T_dl = [0] * length
-
-        # finish time on cloud for each task_index
-        FT_cloud = [0] * length
-        # finish time on sending channel for each task_index
-        FT_ws = [0] * length
-        # finish time locally for each task_index
-        FT_locally = [0] * length
-        # finish time receiving channel for each task_index
-        FT_wr = [0] * length
-
-        # 卸载前的时间
-        self.current_time = max(self.local_available_time, self.edge_available_time)
-        if self.current_time == self.local_available_time:
-            pre_offloading_time = self.current_time + pre_offloading  # 卸载前的总时间
-        else:
-            if len(self.get_node_predecessors(task)) != 0:
-                pre_local_time = max(self.local_available_time,
-                                     max([max(FT_locally[j], FT_wr[j]) for j in
-                                          self.get_node_predecessors(task)])) + pre_offloading
-                pre_offloading_time = max(pre_local_time, self.edge_available_time)
-            else:
-                pre_local_time = self.local_available_time + pre_offloading
-                pre_offloading_time = max(pre_local_time, self.edge_available_time)
-
+    def offloading_step(self, offloading_action, task):
         # locally scheduling
         if offloading_action == 0:
             if len(self.get_node_predecessors(task)) != 0:
                 start_time = max(self.local_available_time,
-                                 max([max(FT_locally[j], FT_wr[j]) for j in
+                                 max([max(self.FT_locally[j], self.FT_wr[j]) for j in
                                       self.get_node_predecessors(task)]))
             else:
                 start_time = self.local_available_time
 
-            T_l_copy = T_l.copy()
-            T_l_copy[task] = self.locally_execution_cost(self.get_node_size(task))
-            FT_locally_copy = FT_locally.copy()
-            FT_locally_copy[task] = start_time + T_l_copy[task]
+            self.T_l[task] = self.locally_execution_cost(self.get_node_size(task))
+            self.FT_locally[task] = start_time + self.T_l[task]
 
-            copy_local_available_time = FT_locally_copy[task]
-            task_finish_time = FT_locally_copy[task]
-
-            copy_current_time = max(task_finish_time, self.edge_available_time)
-            # 如果最大时间在本地端
-            if copy_current_time == copy_local_available_time:
-                after_offloading_time = copy_current_time + after_offloading
-            # 如果最大时间在边端
-            else:
-                if len(self.get_node_predecessors(task)) != 0:
-                    after_local_time = max(copy_local_available_time,
-                                           max([max(FT_locally_copy[j], FT_wr[j]) for j in
-                                                self.get_node_predecessors(task)])) + after_offloading
-                    after_offloading_time = max(copy_current_time, after_local_time)
-
-                else:
-                    after_local_time = copy_local_available_time + after_offloading
-                    after_offloading_time = max(copy_current_time, after_local_time)
-
-            reward = pre_offloading_time - after_offloading_time
-            # 如果reward等于0，说明卸载在本地时间没有变，但是动作应该获得正向激励
-            if reward == 0:
-                # 计算后悔值（假设卸载在边端）
-                if len(self.get_node_predecessors(task)) != 0:
-                    ws_start_time = max(self.ws_available_time,
-                                        max([max(FT_locally[j], FT_ws[j]) for j in
-                                             self.get_node_predecessors(task)]))
-
-                    T_ul_copy = T_ul.copy()
-                    T_ul_copy[task] = self.up_transmission_cost(self.get_node_size(task))
-                    ws_finish_time = ws_start_time + T_ul_copy[task]
-                    FT_ws_copy = FT_ws.copy()
-                    FT_ws_copy[task] = ws_finish_time
-                    copy_ws_available_time = ws_finish_time
-
-                    cloud_start_time = max(self.cloud_available_time,
-                                           max([max(FT_ws_copy[task], FT_cloud[j]) for j in
-                                                self.get_node_predecessors(task)]))
-                    cloud_finish_time = cloud_start_time + self.mec_execution_cost(self.get_node_size(task))
-                    FT_cloud_copy = FT_cloud.copy()
-                    FT_cloud[task] = cloud_finish_time
-                    copy_cloud_available_time = cloud_finish_time
-
-                    wr_start_time = FT_cloud_copy[task]
-                    T_dl_copy = T_dl.copy()
-                    T_dl_copy[task] = self.dl_transmission_cost(self.get_node_expect_size(task))
-                    wr_finish_time = wr_start_time + T_dl_copy[task]
-                    FT_wr_copy = FT_wr.copy()
-                    FT_wr_copy[task] = wr_finish_time
-
-                else:
-                    ws_start_time = self.ws_available_time
-                    T_ul_copy = T_ul.copy()
-                    T_ul_copy[task] = self.up_transmission_cost(self.get_node_size(task))
-                    ws_finish_time = ws_start_time + T_ul_copy[task]
-                    FT_ws_copy = FT_ws.copy()
-                    FT_ws_copy[task] = ws_finish_time
-
-                    cloud_start_time = max(self.cloud_available_time, FT_ws_copy[task])
-                    cloud_finish_time = cloud_start_time + self.mec_execution_cost(self.get_node_size(task))
-                    FT_cloud_copy = FT_cloud.copy()
-                    FT_cloud_copy[task] = cloud_finish_time
-                    copy_cloud_available_time = cloud_finish_time
-
-                    wr_start_time = FT_cloud_copy[task]
-                    T_dl_copy = T_dl.copy()
-                    T_dl_copy[task] = self.dl_transmission_cost(self.get_node_expect_size(task))
-                    wr_finish_time = wr_start_time + T_dl_copy[task]
-                    FT_wr_copy = FT_wr.copy()
-                    FT_wr_copy[task] = wr_finish_time
-                task_finish_time = wr_finish_time
-                copy_edge_available_time = task_finish_time
-                copy_current_time = max(self.local_available_time, task_finish_time)
-                # 如果最大时间在本地端
-                if copy_current_time == self.local_available_time:
-                    v_after_offloading_time = copy_current_time + after_offloading
-                # 如果最大时间在边端
-                else:
-                    if len(self.get_node_predecessors(task)) != 0:
-                        after_local_time = max(copy_local_available_time,
-                                               max([max(FT_locally_copy[j], FT_wr[j]) for j in
-                                                    self.get_node_predecessors(task)])) + after_offloading
-                        v_after_offloading_time = max(copy_current_time, after_local_time)
-
-                    else:
-                        after_local_time = self.local_available_time + after_offloading
-                        v_after_offloading_time = max(copy_current_time, after_local_time)
-
-                reward = v_after_offloading_time - after_offloading_time
-
-            T_l[task] = self.locally_execution_cost(self.get_node_size(task))
-            FT_locally[task] = start_time + T_l[task]
-            self.local_available_time = FT_locally[task]
-            task_finish_time = FT_locally[task]
-
+            self.local_available_time = self.FT_locally[task]
+            task_finish_time = self.FT_locally[task]
+            reward = self.current_time - max(task_finish_time, self.edge_available_time)
             self.current_time = max(task_finish_time, self.edge_available_time)
 
-            return reward, after_offloading_time
+            return reward, self.current_time
 
         # mec scheduling
         else:
             if len(self.get_node_predecessors(task)) != 0:
                 ws_start_time = max(self.ws_available_time,
-                                    max([max(FT_locally[j], FT_ws[j]) for j in
+                                    max([max(self.FT_locally[j], self.FT_ws[j]) for j in
                                          self.get_node_predecessors(task)]))
 
-                T_ul[task] = self.up_transmission_cost(self.get_node_size(task))
-                ws_finish_time = ws_start_time + T_ul[task]
-                FT_ws[task] = ws_finish_time
-                self.ws_available_time = ws_finish_time
+                self.T_ul[task] = self.up_transmission_cost(self.get_node_size(task))
+                ws_finish_time = ws_start_time + self.T_ul[task]
+                self.FT_ws[task] = ws_finish_time
+                self.ws_available_time = ws_finish_time  # 传输后的时间
 
                 cloud_start_time = max(self.cloud_available_time,
-                                       max([max(FT_ws[task], FT_cloud[j]) for j in
+                                       max([max(self.FT_ws[task], self.FT_cloud[j]) for j in
                                             self.get_node_predecessors(task)]))
                 cloud_finish_time = cloud_start_time + self.mec_execution_cost(self.get_node_size(task))
-                FT_cloud[task] = cloud_finish_time
+                self.FT_cloud[task] = cloud_finish_time
                 self.cloud_available_time = cloud_finish_time
 
-                wr_start_time = FT_cloud[task]
-                T_dl[task] = self.dl_transmission_cost(self.get_node_expect_size(task))
-                wr_finish_time = wr_start_time + T_dl[task]
-                FT_wr[task] = wr_finish_time
+                wr_start_time = self.FT_cloud[task]
+                self.T_dl[task] = self.dl_transmission_cost(self.get_node_expect_size(task))
+                wr_finish_time = wr_start_time + self.T_dl[task]
+                self.FT_wr[task] = wr_finish_time
 
             else:
                 ws_start_time = self.ws_available_time
-                T_ul[task] = self.up_transmission_cost(self.get_node_size(task))
-                ws_finish_time = ws_start_time + T_ul[task]
-                FT_ws[task] = ws_finish_time
+                self.T_ul[task] = self.up_transmission_cost(self.get_node_size(task))
+                ws_finish_time = ws_start_time + self.T_ul[task]
+                self.FT_ws[task] = ws_finish_time  # 任务传输给边端后的时间
+                self.ws_available_time = ws_finish_time
 
-                cloud_start_time = max(self.cloud_available_time, FT_ws[task])
+                cloud_start_time = max(self.cloud_available_time, self.FT_ws[task])
                 cloud_finish_time = cloud_start_time + self.mec_execution_cost(self.get_node_size(task))
-                FT_cloud[task] = cloud_finish_time
-                self.cloud_available_time = cloud_finish_time
+                self.FT_cloud[task] = cloud_finish_time
+                self.cloud_available_time = cloud_finish_time  # 任务在边端完成的时间
 
-                wr_start_time = FT_cloud[task]
-                T_dl[task] = self.dl_transmission_cost(self.get_node_expect_size(task))
-                wr_finish_time = wr_start_time + T_dl[task]
-                FT_wr[task] = wr_finish_time
+                wr_start_time = self.FT_cloud[task]
+                self.T_dl[task] = self.dl_transmission_cost(self.get_node_expect_size(task))
+                wr_finish_time = wr_start_time + self.T_dl[task]
+                self.FT_wr[task] = wr_finish_time  # 任务在边端传回本地后完成的时间
 
             task_finish_time = wr_finish_time
             self.edge_available_time = task_finish_time
+            reward = self.current_time - max(self.local_available_time, task_finish_time)
             self.current_time = max(self.local_available_time, task_finish_time)
 
-            # 如果最大时间在本地端
-            if self.current_time == self.local_available_time:
-                after_offloading_time = self.current_time + after_offloading
-            # 如果最大时间在边端
-            else:
-                if len(self.get_node_predecessors(task)) != 0:
-                    after_local_time = max(self.local_available_time,
-                                           max([max(FT_locally[j], FT_wr[j]) for j in
-                                                self.get_node_predecessors(task)])) + after_offloading
-                    after_offloading_time = max(self.current_time, after_local_time)
-
-                else:
-                    after_local_time = self.local_available_time + after_offloading
-                    after_offloading_time = max(self.current_time, after_local_time)
-
-            reward = pre_offloading_time - after_offloading_time
-            return reward, after_offloading_time
+            return reward, self.current_time
 
 
 '''

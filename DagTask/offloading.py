@@ -8,13 +8,13 @@
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
+import torch.nn.functional as F
 import numpy as np
+from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from env.offloading_my_env import OffloadingEnvironment
 from env.offloading_my_env import TaskGraph
-
-import random
 
 '''
     定义GRU模型作为ActorCritic的输入
@@ -24,13 +24,10 @@ import random
     '''
 
 
-class Actor(nn.Module):
-    def __init__(self, state_dim, hidden_dim, unload_dim=2):
-        # state_dim = action_dim = num_nodes; unload_dim = 2
-        super(Actor, self).__init__()
+class PolicyNet(torch.nn.Module):
+    def __init__(self, state_dim, hidden_dim, unload_dim):
+        super(PolicyNet, self).__init__()
         self.gru = nn.GRU(state_dim, hidden_dim)
-        # self.unload_output = nn.Linear(hidden_dim, unload_dim)
-        # 新增的输出层用于卸载位置
         self.unload_output = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -41,37 +38,21 @@ class Actor(nn.Module):
             nn.Linear(hidden_dim, unload_dim)
         )
 
-    def forward(self, state, hidden):
-        output, hidden = self.gru(state.unsqueeze(0), hidden)
-        unload_logits = self.unload_output(output)  # 获取卸载位置的 unload_logits
-        unload_probs = torch.softmax(unload_logits, dim=-1)  # 卸载位置的概率分布
-        return unload_probs, hidden
+    def forward(self, state):
+        output, hidden = self.gru(state)
+        probs = torch.softmax(self.unload_output(output), dim=1)
+        return probs
 
 
-'''
-    定义Critic网络
-    评价
-    '''
-
-
-class Critic(nn.Module):
+class ValueNet(torch.nn.Module):
     def __init__(self, state_dim, hidden_dim):
-        super(Critic, self).__init__()
-        self.gru = nn.GRU(state_dim, hidden_dim)
-        # self.output = nn.Linear(hidden_dim, 1)
-        self.output = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
-        )
+        super(ValueNet, self).__init__()
+        self.fc1 = torch.nn.Linear(state_dim, hidden_dim)
+        self.fc2 = torch.nn.Linear(hidden_dim, 1)
 
-    def forward(self, state, hidden):
-        output, hidden = self.gru(state.unsqueeze(0), hidden)
-        value = self.output(hidden)
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        value = self.fc2(x)
         return value
 
 
@@ -81,17 +62,47 @@ class Critic(nn.Module):
     '''
 
 
-# 定义Actor-Critic类，
-class ActorCritic(nn.Module):
-    def __init__(self, state_dim, hidden_dim, unload_dim=2):
-        super(ActorCritic, self).__init__()
-        self.actor = Actor(state_dim, hidden_dim, unload_dim)
-        self.critic = Critic(state_dim, hidden_dim)
+class ActorCritic:
+    def __init__(self, state_dim, hidden_dim, unload_dim,
+                 actor_lr, critic_lr, gamma, device):
+        # 策略网络
+        self.actor = PolicyNet(state_dim, hidden_dim, unload_dim).to(device)
+        self.critic = ValueNet(state_dim, hidden_dim).to(device)  # 价值网络
+        # 策略网络优化器
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(),
+                                                lr=actor_lr)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(),
+                                                 lr=critic_lr)  # 价值网络优化器
+        self.gamma = gamma
+        self.device = device
 
-    def forward(self, state, hidden):
-        action, next_hidden = self.actor(state, hidden)
-        value = self.critic(state, hidden)
-        return action, value, next_hidden
+    def take_action(self, state):
+        state = torch.tensor([state], dtype=torch.float).to(self.device)
+        probs = self.actor(state)
+        action_dist = torch.distributions.Categorical(probs)
+
+        action = action_dist.sample().item()
+        return action
+
+    def update(self, transition_dict):
+        states = torch.tensor(transition_dict['states'], dtype=torch.float).to(self.device)
+        actions = torch.tensor(transition_dict['actions']).view(-1, 1).to(self.device)
+        rewards = torch.tensor(transition_dict['rewards'], dtype=torch.float).view(-1, 1).to(self.device)
+        next_states = torch.tensor(transition_dict['next_states'], dtype=torch.float).to(self.device)
+        dones = torch.tensor(transition_dict['dones'], dtype=torch.float).view(-1, 1).to(self.device)
+        # 时序差分目标
+        td_target = rewards + self.gamma * self.critic(next_states) * (1 - dones)
+        td_delta = td_target - self.critic(states)  # 时序差分误差
+        log_probs = torch.log(self.actor(states).gather(1, actions))
+        actor_loss = torch.mean(-log_probs * td_delta.detach())
+        # 均方误差损失函数
+        critic_loss = torch.mean(F.mse_loss(self.critic(states), td_target.detach()))
+        self.actor_optimizer.zero_grad()
+        self.critic_optimizer.zero_grad()
+        actor_loss.backward()  # 计算策略网络的梯度
+        critic_loss.backward()  # 计算价值网络的梯度
+        self.actor_optimizer.step()  # 更新策略网络的参数
+        self.critic_optimizer.step()  # 更新价值网络的参数
 
 
 '''
@@ -99,88 +110,120 @@ class ActorCritic(nn.Module):
     '''
 
 
-def train_actor_critic(u_env, ac_model, num_epochs, lr):
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    critic_criterion = nn.MSELoss()
-    epochs = []
-    epoch_rewards = []
-    for epoch in range(num_epochs):
-        u_env.reset()
-        hidden = None
-        log_probs = []
-        values = []
-        rewards = []
-        unload = []  # 卸载位置顺序
+def train_on_policy_agent(schedule_list, env, agent, num_episodes):
+    return_list = []
+    for i in range(10):
+        with tqdm(total=int(num_episodes / 10), desc="Iteration %d" % i) as pbar:
+            for i_episode in range(int(num_episodes / 10)):
+                episode_return = 0
+                transition_dict = {'states': [],
+                                   'hiddens': [],
+                                   'actions': [],
+                                   'next_states': [],
+                                   'rewards': [],
+                                   'dones': []}
 
-        # 调度顺序
-        schedule_list = [2, 4, 8, 1, 0, 9, 3, 7, 10, 6, 11, 13, 17, 14, 18, 5, 12, 16, 15, 19]
-        all_local_time = 0.0
-        for i in schedule_list:
-            task = i + 1
-            task_size = u_env.locally_execution_cost(task_graph.get_node_size(task))
-            all_local_time = all_local_time + task_size
+                index = 0
+                done = False
+                env.reset()
+                while index < len(schedule_list) - 1:
+                    task = schedule_list[index]
+                    next_task = schedule_list[index + 1]
+                    state = env.offloading_state_list()[task]  # 卸载状态
 
-        for i in schedule_list:
-            task = i + 1
-            # 状态
-            state = u_env.offloading_state_list()[task]  # 卸载状态
-            # print(state)
-            state_tensor = torch.tensor(state, dtype=torch.float32)
-            # 模型输出 unload_action 概率分布
-            unload_action_probs, value, hidden = ac_model(state_tensor, hidden)
+                    state[17] = env.local_available_time
+                    state[18] = env.edge_available_time
 
-            # （在调度前获取节点调度情况） 未调度的节点默认在本地运行
-            pre_offloading = all_local_time
-            # （在调度前获取节点调度情况） 未调度的节点默认在本地运行
-            after_offloading = all_local_time - u_env.locally_execution_cost(task_graph.get_node_size(task))
-            all_local_time = after_offloading  # 更新剩余本地调度时间
-            # 卸载动作  根据ϵ-greedy算法选择动作
-            epsilon = 0.1  # 选择随机动作的概率
-            if random.random() < epsilon:
-                # 以ϵ的概率选择随机动作
-                offloading_action = torch.randint(0, unload_action_probs.shape[-1],
-                                                  (1,)).item()  # 替换num_possible_actions为你的动作空间大小
-            else:
-                # 以1-ϵ的概率选择基于模型输出的动作
-                offloading_action = torch.argmax(unload_action_probs).item()
-                # offloading_action = torch.randint(0, unload_action_probs.shape[-1], (1,)).item()
+                    if not transition_dict['actions']:
+                        pass
+                    else:
+                        last_action = transition_dict['actions'][-1]
+                        state[18 + task] = last_action
+                    # print(state)
 
-            unload.append(offloading_action)
-            values.append(value)
+                    action = agent.take_action(state)
+                    reward, current_time = env.offloading_step(action, task)
 
-            reward, schedule_time = u_env.offloading_step(offloading_action, task, pre_offloading,
-                                                          after_offloading)
+                    next_state = env.offloading_state_list()[next_task]
+                    next_state[17] = env.local_available_time
+                    next_state[18] = env.edge_available_time
+                    next_state[18 + task] = action
 
-            # 优势值
-            advantage = reward - float(value)
-            actor_loss = -torch.log(unload_action_probs[0, offloading_action]) * advantage
-            critic_loss = critic_criterion(value, torch.tensor([[[reward]]]))
-            loss = actor_loss + critic_loss
-            optimizer.zero_grad()
-            # loss.backward(retain_graph=True)
-            torch.autograd.grad(loss, ac_model.parameters(), retain_graph=True)
-            optimizer.step()
-            # optimizer.zero_grad()
-            print(f'epoch:{epoch}    reward:{round(reward, 4)}    loss:{loss}')
-        print(f'time:{round(schedule_time, 4)}')
-        print(f'unload:{unload}')
-        # print(f'dag_time:{dag_time}')
+                    transition_dict['states'].append(state)
+                    transition_dict['actions'].append(action)
+                    transition_dict['next_states'].append(next_state)
+                    transition_dict['rewards'].append(reward)
+                    transition_dict['dones'].append(done)
+                    episode_return += reward
+                    index += 1
+                    if next_task == -1:
+                        done = True
+                print(f'episode:{i_episode},actions:{transition_dict["actions"]}')
+                return_list.append(episode_return)
+                agent.update(transition_dict)
+                if (i_episode + 1) % 10 == 0:
+                    pbar.set_postfix({'episode': '%d' % (num_episodes / 10 * i + i_episode + 1),
+                                      'return': '%.3f' % np.mean(return_list[-10])})
+                pbar.update(1)
+    return return_list
+
+
+'''
+    平均化
+    '''
+
+
+def moving_average(a, window_size):
+    cumulative_sum = np.cumsum(np.insert(a, 0, 0))
+    middle = (cumulative_sum[window_size:] - cumulative_sum[:-window_size]) / window_size
+    r = np.arange(1, window_size - 1, 2)
+    begin = np.cumsum(a[:window_size - 1])[::2] / r
+    end = (np.cumsum(a[:-window_size:-1])[::2] / r)[::-1]
+    return np.concatenate((begin, middle, end))
 
 
 if __name__ == "__main__":
-    num_epochs = 1000
-    learning_rate = 0.0001
-    file_path = "./env/data/meta_offloading_20/offload_random20_1/random.20.0.gv"
+    # 参数
+    actor_lr = 1e-5
+    critic_lr = 1e-5
+    num_episodes = 2000
+    gamma = 0.98
+    device = "cpu"
+    # 模型参数
+    state_dim = 39
+    hidden_dim = 128
+    unload_dim = 2
 
-    # 图 结构
-    task_graph = TaskGraph(file_path)
-    # 卸载环境
-    env = OffloadingEnvironment(mec_process_capable=(10 * 1024 * 1024),
-                                mobile_process_capable=(1.0 * 1024 * 1024),
-                                bandwidth_up=14.0,
-                                bandwidth_dl=14.0,
-                                graph_file_paths=file_path)
-    # GRU+AC模型
-    model = ActorCritic(state_dim=17, hidden_dim=512, unload_dim=2)
-    # 训练模型
-    train_actor_critic(env, model, num_epochs, learning_rate)
+    # GRU+AC建模
+    agent = ActorCritic(state_dim, hidden_dim, unload_dim,
+                        actor_lr, critic_lr, gamma, device)
+    # 调度顺序
+    dag_schedule_list = []
+    a = [3, 5, 9, 2, 1, 10, 4, 8, 11, 7, 12, 14, 18, 15, 19, 6, 13, 17, 16, 20, -1]
+    # b = [4, 5, 3, 7, 2, 1, 6, 8, 12, 11, 10, 9, 15, 19, 16, 13, 14, 20, 18, 17, -1]
+    # c = [1, 2, 3, 9, 5, 7, 4, 10, 12, 8, 13, 19, 6, 14, 15, 20, 11, 17, 16, 18, -1]
+    dag_schedule_list.append(a)
+    # dag_schedule_list.append(b)
+    # dag_schedule_list.append(c)
+    # train on policy
+    for i in range(1):
+        # DAG图文件地址
+        file_path = "./env/data/meta_offloading_20/offload_random20_1/random.20.{}.gv".format(i)
+        # 图 结构
+        task_graph = TaskGraph(file_path)
+        # 卸载环境
+        env = OffloadingEnvironment(mec_process_capable=(10 * 1024 * 1024),
+                                    mobile_process_capable=(1.0 * 1024 * 1024),
+                                    bandwidth_up=14.0,
+                                    bandwidth_dl=14.0,
+                                    graph_file_paths=file_path)
+        # 调度list
+        schedule_list = dag_schedule_list[i]
+        return_list = train_on_policy_agent(schedule_list, env, agent, num_episodes)
+        episodes_list = list(range(len(return_list)))
+        mv_return = moving_average(return_list, 9)
+        plt.plot(episodes_list, mv_return)
+        plt.xlabel('Episodes')
+        plt.ylabel('Returns')
+        plt.title('Smooth Actor-Critic on DAG{}'.format(i))
+        plt.show()

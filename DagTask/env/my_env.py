@@ -255,8 +255,6 @@ class unload_env(object):
         # 最坏时间
         bad_time = self.locally_execution_cost(taskGraph(file_path).sum_data_size())
 
-        assert abs(bad_time - 1212) < 1
-
         # running time on local processor   # 本地运行时间
         T_l = [0] * taskGraph(file_path).num_nodes
         # running time on sending channel   # 传输到边缘时间
